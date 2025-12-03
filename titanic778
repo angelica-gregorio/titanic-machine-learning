@@ -1,0 +1,302 @@
+%% ========================================================================
+%% LBYEC3B FINAL PROJECT: TITANIC SURVIVAL ANALYSIS
+%% ========================================================================
+% SECTIONS:
+% 1. Statistical Analysis of the Dataset (Descriptive Statistics)
+% 2. Clustering Analysis (Unsupervised Learning - K-Means)
+% 3. Data Parsing and Wrangling (Cleaning & Feature Engineering)
+% 4. Model Testing and Hyperparameter Tuning
+% 5. Data and Results (Confusion Matrix and Kaggle Score)
+
+close all; clear; clc;
+rng(42); % Ensure Reproducibility
+
+%% ========================================================================
+%% 1. STATISTICAL ANALYSIS OF THE DATASET
+%% ========================================================================
+fprintf('========================================\n');
+fprintf('1. STATISTICAL ANALYSIS & EDA\n');
+fprintf('========================================\n');
+
+% Load Raw Data
+trainData = readtable('train.csv');
+testData  = readtable('test.csv');
+
+% --- A. Summary Statistics ---
+fprintf('\n--- Dataset Summary ---\n');
+summary(trainData);
+
+% --- B. Survival Counts (Labeled Table) ---
+fprintf('\n--- Survival Counts ---\n');
+survCounts = groupcounts(trainData, 'Survived');
+SurvTable = table({'Died'; 'Survived'}, survCounts.GroupCount, ...
+    'VariableNames', {'Outcome', 'Count'});
+disp(SurvTable);
+
+% --- C. Survival by Gender (Labeled Table) ---
+fprintf('\n--- Survival by Gender ---\n');
+[gTab, ~, ~, gLabels] = crosstab(trainData.Sex, trainData.Survived);
+if ~isempty(gLabels)
+    GenderStats = array2table(gTab, 'RowNames', gLabels(1:2,1), ...
+        'VariableNames', {'Died', 'Survived'});
+    disp(GenderStats);
+else
+    disp(gTab);
+end
+
+% --- D. Visualizations (Exploratory Data Analysis) ---
+figure('Name', 'Exploratory Data Analysis', 'Position', [50, 50, 1000, 800]);
+
+% Plot 1: Age Distribution
+subplot(2, 2, 1);
+histogram(trainData.Age, 'BinWidth', 5, 'FaceColor', [0.2 0.6 0.8]);
+title('Age Distribution'); xlabel('Age'); ylabel('Count'); grid on;
+
+% Plot 2: Survival by Gender (Dynamic Alignment)
+subplot(2, 2, 2);
+bar(gTab);
+title('Survival by Gender'); 
+xlabel('Gender'); ylabel('Count');
+if ~isempty(gLabels)
+    xticklabels(gLabels(1:2,1)); 
+end
+legend({'Died', 'Survived'}, 'Location', 'northwest'); grid on;
+
+% Plot 3: Survival by Class (Dynamic Alignment)
+subplot(2, 2, 3);
+[classTab, ~, ~, classLabels] = crosstab(trainData.Pclass, trainData.Survived);
+bar(classTab, 'stacked');
+title('Survival by Class'); 
+xlabel('Socio-Economic Class'); ylabel('Count');
+if ~isempty(classLabels)
+    xticklabels({'Class 1 (Upper)', 'Class 2 (Middle)', 'Class 3 (Lower)'});
+end
+legend({'Died', 'Survived'}, 'Location', 'northwest'); grid on;
+
+% Plot 4: Correlation Heatmap (Aligned to True Results)
+subplot(2, 2, 4);
+% Create numeric subset for correlation
+corrData = trainData(:, {'Survived', 'Pclass', 'Age', 'SibSp', 'Parch', 'Fare'});
+% Assign 1 for Female (Higher Survival) to get Positive Correlation
+corrData.GenderNum = double(strcmp(trainData.Sex, 'female')); 
+corrMat = corr(table2array(corrData), 'Rows', 'complete');
+heatmapLabels = {'Survived', 'Class', 'Age', 'Siblings', 'Parents', 'Fare', 'Gender(F=1)'};
+heatmap(heatmapLabels, heatmapLabels, corrMat, 'Colormap', parula);
+title('Correlation Matrix');
+
+drawnow;
+fprintf('✓ EDA Visualizations Generated (Figure 1).\n');
+
+%% ========================================================================
+%% 2. CLUSTERING ANALYSIS (Unsupervised Learning)
+%% ========================================================================
+fprintf('\n========================================\n');
+fprintf('2. CLUSTERING ANALYSIS (K-Means)\n');
+fprintf('========================================\n');
+
+% Prepare Data for Clustering (Temporary Imputation for Visualization)
+cleanTrain = trainData;
+cleanTrain.Age(isnan(cleanTrain.Age)) = median(cleanTrain.Age, 'omitnan'); 
+cleanTrain.Fare(isnan(cleanTrain.Fare)) = median(cleanTrain.Fare, 'omitnan');
+
+% Use Age and Fare to find natural groupings
+X_Cluster = [cleanTrain.Age, cleanTrain.Fare];
+X_Norm = normalize(X_Cluster); % Normalize to weigh features equally
+
+% Perform K-Means (K=2)
+[idx, ~] = kmeans(X_Norm, 2); 
+
+% Visualize: Comparison of Unsupervised vs Actual
+figure('Name', 'Clustering Analysis', 'Position', [150, 150, 1000, 500]);
+
+% Subplot 1: K-Means Clustering Results
+subplot(1, 2, 1);
+gscatter(X_Cluster(:,1), X_Cluster(:,2), idx);
+title('K-Means Clustering (K=2)'); xlabel('Age'); ylabel('Fare');
+legend('Cluster 1', 'Cluster 2'); grid on;
+
+% Subplot 2: Actual Survival Labels
+subplot(1, 2, 2);
+gscatter(X_Cluster(:,1), X_Cluster(:,2), cleanTrain.Survived);
+title('Actual Survival (Ground Truth)'); xlabel('Age'); ylabel('Fare');
+legend('Died', 'Survived'); grid on;
+
+drawnow;
+fprintf('✓ Clustering Visualizations Generated (Figure 2).\n');
+
+%% ========================================================================
+%% 3. DATA PARSING AND WRANGLING
+%% ========================================================================
+fprintf('\n========================================\n');
+fprintf('3. DATA PARSING AND WRANGLING\n');
+fprintf('========================================\n');
+
+% Combine for consistent processing
+trainData.IsTrain = true(height(trainData), 1);
+testData.IsTrain = false(height(testData), 1);
+testData.Survived = NaN(height(testData), 1);
+allData = [trainData; testData];
+
+% --- Missing Value Imputation ---
+fprintf('   > Imputing missing values (Age, Fare, Embarked)...\n');
+for p = 1:3
+    for s = ["male","female"]
+        mask = (allData.Pclass == p) & strcmp(allData.Sex,s);
+        medAge = median(allData.Age(mask), 'omitnan');
+        allData.Age(mask & isnan(allData.Age)) = medAge;
+    end
+end
+allData.Fare = fillmissing(allData.Fare, 'constant', median(allData.Fare, 'omitnan'));
+allData.Embarked = categorical(allData.Embarked);
+allData.Embarked = fillmissing(allData.Embarked, 'constant', mode(allData.Embarked));
+
+% --- Feature Engineering (Improved based on Insights) ---
+fprintf('   > Engineering Features (FamilySize, Title, Interactions)...\n');
+
+% 1. Basic Features
+allData.FamilySize = allData.SibSp + allData.Parch + 1;
+allData.Sex = categorical(allData.Sex);
+
+% 2. Title Extraction
+allData.Title = extractBetween(allData.Name, ", ", ".");
+allData.Title = strtrim(allData.Title);
+titles = string(allData.Title);
+titles(ismember(titles, ["Mr"])) = "Mr";
+titles(ismember(titles, ["Miss", "Mlle", "Ms"])) = "Miss";
+titles(ismember(titles, ["Mrs", "Mme"])) = "Mrs";
+titles(ismember(titles, ["Master"])) = "Master";
+titles(~ismember(titles, ["Mr", "Miss", "Mrs", "Master"])) = "Rare";
+allData.TitleGroup = categorical(titles);
+
+% 3. Interaction Features (Leveraging High Correlation of Class & Gender)
+% Insight: Females in Upper Classes have very high survival rates.
+% Insight: Males in Lower Classes have very low survival rates.
+
+allData.IsFemale = double(allData.Sex == 'female'); 
+allData.IsHighClass = double(allData.Pclass < 3);
+
+% Interaction Terms
+allData.HighClassFemale = allData.IsFemale .* allData.IsHighClass; 
+allData.LowClassMale = (1 - allData.IsFemale) .* (1 - allData.IsHighClass); 
+
+% --- Numeric Conversion for Models ---
+colsToDrop = {'PassengerId', 'Name', 'Ticket', 'Cabin', 'Title', 'Sex'}; 
+allData = removevars(allData, colsToDrop);
+
+% Split back to Train/Test
+trainClean = allData(allData.IsTrain, :);
+testClean  = allData(~allData.IsTrain, :);
+trainClean.IsTrain = []; testClean.IsTrain = []; testClean.Survived = [];
+
+% Convert to Numeric Matrices
+toNumeric = @(t) table2array(varfun(@double, t, 'OutputFormat', 'table'));
+X = removevars(trainClean, 'Survived');
+y = trainClean.Survived;
+
+% Train-Validation Split (80/20)
+cv = cvpartition(height(X), 'HoldOut', 0.2);
+X_Train = X(training(cv), :);    y_Train = y(training(cv));
+X_Val   = X(test(cv), :);        y_Val   = y(test(cv));
+
+% Numeric versions
+X_Train_Num = toNumeric(X_Train);
+X_Val_Num   = toNumeric(X_Val);
+X_Test_Num  = toNumeric(testClean);
+
+fprintf('✓ Data Wrangling Complete (Interaction Features Aligned).\n');
+
+%% ========================================================================
+%% 4. MODEL TESTING AND HYPERPARAMETER TUNING
+%% ========================================================================
+fprintf('\n========================================\n');
+fprintf('4. MODEL TESTING & HYPERPARAMETER TUNING\n');
+fprintf('========================================\n');
+
+results = table('Size',[4,2], 'VariableTypes',{'string','double'}, 'VariableNames',{'Model','Accuracy'});
+results.Model = {'Linear Regression'; 'KNN'; 'ANN (Regression)'; 'Stacked Ensemble'};
+
+% --- Model A: Linear Regression ---
+fprintf('Training Linear Regression...\n');
+linModel = fitlm(X_Train_Num, y_Train);
+% Get continuous scores
+score_Lin_Val = predict(linModel, X_Val_Num);
+score_Lin_Test = predict(linModel, X_Test_Num);
+accLin = mean(double(score_Lin_Val > 0.5) == y_Val);
+results.Accuracy(1) = accLin * 100;
+
+% --- Model B: K-Nearest Neighbors (KNN) ---
+fprintf('Training KNN...\n');
+knnModel = fitcknn(X_Train_Num, y_Train, 'NumNeighbors', 9, ... 
+    'Distance', 'euclidean', 'Standardize', true);
+[~, score_KNN_Val_Raw] = predict(knnModel, X_Val_Num);
+score_KNN_Val = score_KNN_Val_Raw(:,2); 
+[~, score_KNN_Test_Raw] = predict(knnModel, X_Test_Num);
+score_KNN_Test = score_KNN_Test_Raw(:,2);
+accKNN = mean(predict(knnModel, X_Val_Num) == y_Val);
+results.Accuracy(2) = accKNN * 100;
+
+% --- Model C: ANN (Regression) ---
+fprintf('Training ANN (Regression)...\n');
+annModel = fitrnet(X_Train_Num, y_Train, 'LayerSizes', [20, 10], ...
+    'Activations', 'relu', 'Standardize', true, 'Verbose', 0);
+score_ANN_Val = predict(annModel, X_Val_Num);
+score_ANN_Test = predict(annModel, X_Test_Num);
+accANN = mean(double(score_ANN_Val > 0.5) == y_Val);
+results.Accuracy(3) = accANN * 100;
+
+% --- Model D: Stacked Ensemble (Weighted Average) ---
+fprintf('Creating Stacked Ensemble...\n');
+% Averaging the scores
+score_Stack_Val = (0.4*score_Lin_Val + 0.3*score_KNN_Val + 0.3*score_ANN_Val);
+score_Stack_Test = (0.4*score_Lin_Test + 0.3*score_KNN_Test + 0.3*score_ANN_Test);
+
+pred_Stack_Val = double(score_Stack_Val > 0.5);
+accStack = mean(pred_Stack_Val == y_Val);
+results.Accuracy(4) = accStack * 100;
+
+fprintf('✓ Models Trained. Stacking Complete.\n');
+
+%% ========================================================================
+%% 5. DATA AND RESULTS
+%% ========================================================================
+fprintf('\n========================================\n');
+fprintf('5. DATA AND RESULTS\n');
+fprintf('========================================\n');
+
+% Display Model Comparison
+disp(results);
+[bestAcc, bestIdx] = max(results.Accuracy);
+fprintf('✓ BEST MODEL: %s (%.2f%%)\n', results.Model{bestIdx}, bestAcc);
+
+% --- Confusion Matrix ---
+figure('Name', 'Confusion Matrix', 'Position', [700, 100, 500, 400]);
+
+switch bestIdx
+    case 1, finalValPred = double(score_Lin_Val > 0.5);
+    case 2, finalValPred = predict(knnModel, X_Val_Num);
+    case 3, finalValPred = double(score_ANN_Val > 0.5);
+    case 4, finalValPred = pred_Stack_Val;
+end
+
+cm = confusionchart(y_Val, finalValPred);
+cm.Title = sprintf('Confusion Matrix: %s', results.Model{bestIdx});
+cm.RowSummary = 'row-normalized';
+
+% --- Kaggle Submission Score ---
+fprintf('\n--- Generating Kaggle Submission ---\n');
+
+switch bestIdx
+    case 1, finalTestPred = double(score_Lin_Test > 0.5);
+    case 2, finalTestPred = predict(knnModel, X_Test_Num);
+    case 3, finalTestPred = double(score_ANN_Test > 0.5);
+    case 4, finalTestPred = double(score_Stack_Test > 0.5);
+end
+
+% Create CSV
+origTest = readtable('test.csv');
+submission = table(origTest.PassengerId, finalTestPred, 'VariableNames', {'PassengerId', 'Survived'});
+filename = 'submission_final.csv';
+writetable(submission, filename);
+
+fprintf('✓ File saved: %s\n', filename);
+fprintf('✓ Ready for Kaggle upload to check Score!\n');
