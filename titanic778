@@ -244,17 +244,39 @@ score_ANN_Test = predict(annModel, X_Test_Num);
 accANN = mean(double(score_ANN_Val > 0.5) == y_Val);
 results.Accuracy(3) = accANN * 100;
 
-% --- Model D: Stacked Ensemble (Weighted Average) ---
-fprintf('Creating Stacked Ensemble...\n');
-% Averaging the scores
-score_Stack_Val = (0.4*score_Lin_Val + 0.3*score_KNN_Val + 0.3*score_ANN_Val);
-score_Stack_Test = (0.4*score_Lin_Test + 0.3*score_KNN_Test + 0.3*score_ANN_Test);
+% --- Model D: Optimized Stacked Ensemble (Grid Search) ---
+fprintf('Optimizing Ensemble Weights (Grid Search)...\n');
+
+bestStackAcc = 0;
+bestWeights = [0 0 0];
+
+% Iterate to find best weight combination (W1+W2+W3 = 1)
+% Steps of 0.05 for granularity
+for w1 = 0:0.05:1
+    for w2 = 0:0.05:(1-w1)
+        w3 = 1 - w1 - w2;
+        
+        % Combined score
+        tempScore = (w1*score_Lin_Val + w2*score_KNN_Val + w3*score_ANN_Val);
+        tempAcc = mean(double(tempScore > 0.5) == y_Val);
+        
+        if tempAcc > bestStackAcc
+            bestStackAcc = tempAcc;
+            bestWeights = [w1, w2, w3];
+        end
+    end
+end
+
+fprintf('   > Optimal Weights Found: Linear=%.2f, KNN=%.2f, ANN=%.2f\n', bestWeights);
+
+% Apply optimal weights
+score_Stack_Val = (bestWeights(1)*score_Lin_Val + bestWeights(2)*score_KNN_Val + bestWeights(3)*score_ANN_Val);
+score_Stack_Test = (bestWeights(1)*score_Lin_Test + bestWeights(2)*score_KNN_Test + bestWeights(3)*score_ANN_Test);
 
 pred_Stack_Val = double(score_Stack_Val > 0.5);
-accStack = mean(pred_Stack_Val == y_Val);
-results.Accuracy(4) = accStack * 100;
+results.Validation_Accuracy_Pct(4) = bestStackAcc * 100;
 
-fprintf('✓ Models Trained. Stacking Complete.\n');
+fprintf('✓ Models Trained. Ensemble Optimized.\n');
 
 %% ========================================================================
 %% 5. DATA AND RESULTS
