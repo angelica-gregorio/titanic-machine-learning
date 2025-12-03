@@ -1,0 +1,373 @@
+%% 
+%% Clean start
+close all; clear; clc;
+rng(42); % Ensure reproducibility
+
+%% Load data
+trainData = readtable('train.csv'); 
+testData  = readtable('test.csv');
+
+%% Statistical Analysis of the Dataset
+summary(trainData);
+
+% Count survivors
+tabulate(trainData.Survived)
+
+% Average age by survival
+grpstats(trainData, 'Survived', {'mean'}, 'DataVars', 'Age')
+
+% Gender vs survival
+tabulate(trainData.Sex)
+crosstab(trainData.Sex, trainData.Survived)
+
+% Class distribution
+tabulate(trainData.Pclass)
+
+% Visuals (optional)
+figure;
+histogram(trainData.Age);
+title('Age Distribution');
+
+figure;
+bar(crosstab(trainData.Sex, trainData.Survived));
+title('Survival by Gender');
+xlabel('Gender'); ylabel('Count');
+legend('Did Not Survive', 'Survived');
+
+%% CORRELATION ANALYSIS WITH SURVIVAL
+dataCorr = trainData;
+
+% Convert text columns to categorical first
+textVars = {'Sex','Embarked','Cabin','Name','Ticket'};
+for i = 1:length(textVars)
+    if iscell(dataCorr.(textVars{i}))
+        dataCorr.(textVars{i}) = categorical(dataCorr.(textVars{i}));
+    end
+end
+
+% Now convert categorical variables to numeric codes
+varNames = dataCorr.Properties.VariableNames;
+for i = 1:numel(varNames)
+    if iscategorical(dataCorr.(varNames{i}))
+        dataCorr.(varNames{i}) = double(dataCorr.(varNames{i}));
+    end
+end
+
+dataCorr = removevars(dataCorr, {'Name','Ticket','Cabin','PassengerId'});
+
+% Convert to numeric matrix
+dataArray = table2array(dataCorr);
+varNamesCorr = dataCorr.Properties.VariableNames;
+
+% Pearson correlation
+pearsonCorr = corr(dataArray, 'Rows', 'complete', 'Type', 'Pearson');
+
+% Spearman correlation
+spearmanCorr = corr(dataArray, 'Rows', 'complete', 'Type', 'Spearman');
+
+survIdx = strcmp(varNamesCorr, 'Survived');
+corrWithSurvival_Pearson = pearsonCorr(:, survIdx);
+corrWithSurvival_Spearman = spearmanCorr(:, survIdx);
+
+Tcorr = table(varNamesCorr', corrWithSurvival_Pearson, corrWithSurvival_Spearman, ...
+    'VariableNames', {'Feature','Pearson','Spearman'});
+Tcorr(strcmp(Tcorr.Feature,'Survived'),:) = [];
+
+% Sort by absolute correlation (Spearman preferred)
+Tcorr = sortrows(Tcorr, 'Spearman', 'descend');
+disp('=== Correlation of Each Feature with Survival ===');
+disp(Tcorr);
+
+figure;
+heatmap(varNamesCorr, varNamesCorr, pearsonCorr, ...
+    'Colormap', parula, 'ColorbarVisible', 'on');
+title('Pearson Correlation Matrix');
+
+figure;
+heatmap(varNamesCorr, varNamesCorr, spearmanCorr, ...
+    'Colormap', turbo, 'ColorbarVisible', 'on');
+title('Spearman Correlation Matrix');
+
+%% Data Cleaning - TRAIN DATA
+
+% Fill Age missing values using median per Pclass & Sex
+for p = 1:3
+    for s = ["male","female"]
+        mask = (trainData.Pclass == p) & strcmp(trainData.Sex,s);
+        medAge = median(trainData.Age(mask),'omitnan');
+        trainData.Age(mask & isnan(trainData.Age)) = medAge;
+    end
+end
+
+% Convert Embarked to categorical
+trainData.Embarked = categorical(trainData.Embarked);
+
+% Fill missing Embarked with its mode
+modeEmbarked = mode(trainData.Embarked);
+trainData.Embarked = fillmissing(trainData.Embarked,'constant',modeEmbarked);
+
+% Verify missing values
+missingCounts = sum(ismissing(trainData));
+T = table(trainData.Properties.VariableNames', missingCounts', ...
+          'VariableNames', {'Column', 'MissingCount'});
+disp(T)
+
+%% Data Cleaning - TEST DATA
+
+% Fill missing Age in test set using the same logic
+for p = 1:3
+    for s = ["male","female"]
+        mask = (testData.Pclass == p) & strcmp(testData.Sex,s);
+        medAge = median(testData.Age(mask),'omitnan');
+        testData.Age(mask & isnan(testData.Age)) = medAge;
+    end
+end
+
+% Fill missing Fare in test set (if any)
+if any(isnan(testData.Fare))
+    medianFare = median(testData.Fare, 'omitnan');
+    testData.Fare(isnan(testData.Fare)) = medianFare;
+end
+
+% Convert Embarked to categorical
+testData.Embarked = categorical(testData.Embarked);
+
+% Fill missing Embarked with mode from TRAIN (important!)
+testData.Embarked = fillmissing(testData.Embarked, 'constant', modeEmbarked);
+
+%% FEATURE ENGINEERING
+
+%% 1. TITLE EXTRACTION & GROUPING
+trainData = extractAndGroupTitles(trainData);
+testData = extractAndGroupTitles(testData);
+
+%% 2. FAMILY SIZE FEATURES
+trainData.FamilySize = trainData.SibSp + trainData.Parch + 1;
+testData.FamilySize = testData.SibSp + testData.Parch + 1;
+
+trainData.FamilySizeCat = categorizeFamilySize(trainData.FamilySize);
+testData.FamilySizeCat = categorizeFamilySize(testData.FamilySize);
+
+trainData.IsAlone = trainData.FamilySize == 1;
+testData.IsAlone = testData.FamilySize == 1;
+
+%% 3. AGE GROUP BINNING
+trainData.AgeGroup = binAgeGroups(trainData.Age);
+testData.AgeGroup = binAgeGroups(testData.Age);
+
+%% 4. FARE PER PERSON
+trainData.FarePerPerson = trainData.Fare ./ trainData.FamilySize;
+testData.FarePerPerson = testData.Fare ./ testData.FamilySize;
+
+trainData.FarePerPerson(isinf(trainData.FarePerPerson) | isnan(trainData.FarePerPerson)) = 0;
+testData.FarePerPerson(isinf(testData.FarePerPerson) | isnan(testData.FarePerPerson)) = 0;
+
+%% 5. FARE BINS
+fareBins = quantile(trainData.Fare(trainData.Fare > 0), [0.25, 0.5, 0.75]);
+trainData.FareBin = binFare(trainData.Fare, fareBins);
+testData.FareBin = binFare(testData.Fare, fareBins);
+
+%% 6. INTERACTION FEATURES
+% Sex × Pclass
+trainData.Sex_Pclass = categorical(strcat(string(trainData.Sex), '_', string(trainData.Pclass)));
+testData.Sex_Pclass = categorical(strcat(string(testData.Sex), '_', string(testData.Pclass)));
+
+% Sex × Age Group
+trainData.Sex_Age = categorical(strcat(string(trainData.Sex), '_', string(trainData.AgeGroup)));
+testData.Sex_Age = categorical(strcat(string(testData.Sex), '_', string(testData.AgeGroup)));
+
+%% 7. DECK EXTRACTION
+trainData.Deck = extractDeck(trainData);
+testData.Deck = extractDeck(testData);
+
+%% 8. IS CHILD
+trainData.IsChild = trainData.Age < 16;
+testData.IsChild = testData.Age < 16;
+
+%% 9. IS MOTHER
+trainData.IsMother = strcmp(trainData.Sex, 'female') & (trainData.Parch > 0) & (trainData.Age > 18);
+testData.IsMother = strcmp(testData.Sex, 'female') & (testData.Parch > 0) & (testData.Age > 18);
+
+%% 10. TICKET FREQUENCY
+trainData = addTicketFrequency(trainData);
+testData = addTicketFrequency(testData);
+
+% Encode categoricals
+trainData.Sex = categorical(trainData.Sex);
+testData.Sex = categorical(testData.Sex);
+
+trainData.Embarked = categorical(trainData.Embarked);
+testData.Embarked = categorical(testData.Embarked);
+
+%% Now drop Cabin, Ticket, Title (we extracted features from them)
+trainData.Cabin = [];
+trainData.Ticket = [];
+trainData.Title = [];
+
+testData.Cabin = [];
+testData.Ticket = [];
+testData.Title = [];
+
+disp('Feature engineering complete!');
+
+%% Define Features (X) and Target (y)
+X = removevars(trainData, {'PassengerId','Name','Survived'});
+y = trainData.Survived;
+
+Xtest = removevars(testData, {'PassengerId','Name'});
+
+disp('Training and test data cleaned and preprocessed successfully!')
+
+%% Train-Validation Split
+cv = cvpartition(height(trainData), 'HoldOut', 0.2);
+idxTrain = training(cv);
+idxVal = test(cv);
+
+Xtrain = X(idxTrain, :);
+ytrain = y(idxTrain, :);
+
+Xval = X(idxVal, :);
+yval = y(idxVal, :);
+
+%% Hyperparameter Tuning - Regularized Logistic Regression
+XtrainMat = table2array(varfun(@double, Xtrain));
+XvalMat   = table2array(varfun(@double, Xval));
+
+% Use built-in optimization
+disp('Training regularized logistic regression with hyperparameter optimization...');
+
+mdl = fitclinear(XtrainMat, ytrain, ...
+    'Learner', 'logistic', ...
+    'Regularization', 'lasso', ...
+    'OptimizeHyperparameters', 'auto', ...
+    'HyperparameterOptimizationOptions', struct(...
+        'AcquisitionFunctionName', 'expected-improvement-plus', ...
+        'ShowPlots', false, ...
+        'Verbose', 1));
+
+% Evaluate on validation set
+yPred = predict(mdl, XvalMat);
+valAcc = mean(yPred == yval);
+
+fprintf('\nValidation Accuracy: %.2f%%\n', valAcc * 100);
+
+% Confusion matrix
+figure;
+confusionchart(yval, yPred);
+title(sprintf('Validation Set - Accuracy: %.2f%%', valAcc * 100));
+
+%% Generate predictions on test set
+XtestMat = table2array(varfun(@double, Xtest));
+yTestPred = predict(mdl, XtestMat);
+
+submission = table(testData.PassengerId, yTestPred, ...
+    'VariableNames', {'PassengerId', 'Survived'});
+
+writetable(submission, 'submission_improved_features.csv');
+disp('submission_improved_features.csv created successfully!');
+
+%% ========== HELPER FUNCTIONS ==========
+
+function data = extractAndGroupTitles(data)
+    data.Title = extractBetween(data.Name, ", ", ".");
+    data.Title = strtrim(data.Title);
+    
+    titles = string(data.Title);
+    groupedTitles = titles;
+    
+    % Nobility/Wealthy
+    groupedTitles(ismember(titles, ["Don", "Dona", "Sir", "Lady", "Countess", "Jonkheer", "the Countess"])) = "Noble";
+    
+    % Professional/Military
+    groupedTitles(ismember(titles, ["Col", "Major", "Capt", "Rev", "Dr"])) = "Professional";
+    
+    % Married women
+    groupedTitles(titles == "Mrs") = "Mrs";
+    groupedTitles(titles == "Mme") = "Mrs";
+    
+    % Unmarried women
+    groupedTitles(titles == "Miss") = "Miss";
+    groupedTitles(ismember(titles, ["Mlle", "Ms"])) = "Miss";
+    
+    % Men
+    groupedTitles(titles == "Mr") = "Mr";
+    
+    % Master (boys)
+    groupedTitles(ismember(titles, ["Master"])) = "Master";
+    
+    % Any remaining rare titles
+    commonTitles = ["Mr", "Miss", "Mrs", "Master", "Noble", "Professional"];
+    groupedTitles(~ismember(groupedTitles, commonTitles)) = "Rare";
+    
+    data.TitleGrouped = categorical(groupedTitles);
+end
+
+function familySizeCat = categorizeFamilySize(familySize)
+    familySizeCat = strings(size(familySize));
+    
+    familySizeCat(familySize == 1) = "Alone";
+    familySizeCat(familySize >= 2 & familySize <= 4) = "Small";
+    familySizeCat(familySize >= 5) = "Large";
+    
+    familySizeCat = categorical(familySizeCat);
+end
+
+function ageGroup = binAgeGroups(age)
+    ageGroup = strings(size(age));
+    
+    ageGroup(age < 16) = "Child";
+    ageGroup(age >= 16 & age < 32) = "Young";
+    ageGroup(age >= 32 & age < 48) = "Middle";
+    ageGroup(age >= 48) = "Senior";
+    
+    ageGroup = categorical(ageGroup);
+end
+
+function fareBin = binFare(fare, fareBins)
+    fareBin = strings(size(fare));
+    
+    fareBin(fare <= fareBins(1)) = "Low";
+    fareBin(fare > fareBins(1) & fare <= fareBins(2)) = "Medium";
+    fareBin(fare > fareBins(2) & fare <= fareBins(3)) = "High";
+    fareBin(fare > fareBins(3)) = "VeryHigh";
+    
+    fareBin = categorical(fareBin);
+end
+
+function deck = extractDeck(data)
+    deck = strings(height(data), 1);
+    
+    if ismember('Cabin', data.Properties.VariableNames)
+        cabins = string(data.Cabin);
+        for i = 1:length(cabins)
+            if strlength(cabins(i)) > 0 && ~ismissing(cabins(i))
+                deck(i) = extractBefore(cabins(i), 2);
+            else
+                deck(i) = "Unknown";
+            end
+        end
+    else
+        deck(:) = "Unknown";
+    end
+    
+    deck = categorical(deck);
+end
+
+function data = addTicketFrequency(data)
+    if ~ismember('Ticket', data.Properties.VariableNames)
+        data.TicketFreq = ones(height(data), 1);
+        return;
+    end
+    
+    tickets = string(data.Ticket);
+    ticketFreq = zeros(height(data), 1);
+    
+    uniqueTickets = unique(tickets);
+    for i = 1:length(uniqueTickets)
+        mask = tickets == uniqueTickets(i);
+        count = sum(mask);
+        ticketFreq(mask) = count;
+    end
+    
+    data.TicketFreq = ticketFreq;
+end
